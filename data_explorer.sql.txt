@@ -1,0 +1,118 @@
+-- =============================================================================
+-- PROJET : ANALYSE EXPLORATOIRE DES DONNÉES (EDA) - WORLD LAYOFFS
+-- Outil : MySQL Workbench
+-- Objectif : Faire parler les données pour identifier les tendances majeures
+--            des licenciements dans la Tech (Entreprises, Pays, Périodes).
+-- =============================================================================
+
+-- 0. Vue d'ensemble du dataset nettoyé
+SELECT *
+FROM layoffs_staging2;
+
+
+-- -----------------------------------------------------------------------------
+-- ÉTAPE 1 : RECHERCHE DES EXTRÊMES ET DES RECORDS
+-- -----------------------------------------------------------------------------
+
+-- 1.1. Quels sont les records absolus de licenciements en une seule fois ?
+-- (MAX de 1 = 100% de l'entreprise licenciée)
+SELECT MAX(total_laid_off), MAX(percentage_laid_off)
+FROM layoffs_staging2;
+
+-- 1.2. Quelles entreprises ont complètement mis la clé sous la porte (100% de licenciements) ?
+-- Classées par les fonds levés pour voir les plus gros "gâchis" financiers.
+SELECT *
+FROM layoffs_staging2
+WHERE percentage_laid_off = 1
+ORDER BY funds_raised_millions DESC;
+
+-- 1.3. Quelle est la plage temporelle couverte par ce dataset ?
+SELECT MIN(`date`), MAX(`date`)
+FROM layoffs_staging2;
+
+
+-- -----------------------------------------------------------------------------
+-- ÉTAPE 2 : GROUPEMENTS PAR ENTITÉS (ENTREPRISES, PAYS, STADES)
+-- -----------------------------------------------------------------------------
+
+-- 2.1. Top des entreprises ayant le plus licencié au total (cumulé sur toute la période)
+SELECT company, SUM(total_laid_off)
+FROM layoffs_staging2
+GROUP BY company
+ORDER BY 2 DESC;
+
+-- 2.2. Top des pays les plus touchés par les licenciements
+SELECT country, SUM(total_laid_off)
+FROM layoffs_staging2
+GROUP BY country
+ORDER BY 2 DESC;
+
+-- 2.3. Analyse des licenciements selon la maturité de l'entreprise (Stage : Seed, Series A, Post-IPO...)
+SELECT stage, SUM(total_laid_off)
+FROM layoffs_staging2
+GROUP BY stage
+ORDER BY 2 DESC;
+
+
+-- -----------------------------------------------------------------------------
+-- ÉTAPE 3 : ANALYSE DES TENDANCES TEMPORELLES (PAR ANNÉE ET PAR MOIS)
+-- -----------------------------------------------------------------------------
+
+-- 3.1. Évolution globale du nombre de licenciements année par année
+SELECT YEAR(`date`), SUM(total_laid_off)
+FROM layoffs_staging2
+GROUP BY YEAR(`date`)
+ORDER BY 1 DESC;
+
+-- 3.2. Répartition mensuelle brute (Format YYYY-MM) pour repérer la saisonnalité
+SELECT SUBSTRING(`date`,1,7) AS `MONTH`, SUM(total_laid_off)
+FROM layoffs_staging2
+WHERE SUBSTRING(`date`,1,7) IS NOT NULL
+GROUP BY `MONTH`
+ORDER BY 1 ASC;
+
+
+-- -----------------------------------------------------------------------------
+-- ÉTAPE 4 : ANALYSES AVANCÉES (TOTAL GLISSANT ET CLASSEMENTS PAR FENÊTRAGE)
+-- -----------------------------------------------------------------------------
+
+-- 4.1. Calcul d'un Total Glissant (Rolling Total) mois par mois
+-- Permet de voir la courbe de croissance cumulative des licenciements dans le temps.
+WITH Rolling_Total AS
+(
+    SELECT SUBSTRING(`date`,1,7) AS `MONTH`, SUM(total_laid_off) AS total_off
+    FROM layoffs_staging2
+    WHERE SUBSTRING(`date`,1,7) IS NOT NULL
+    GROUP BY `MONTH`
+    ORDER BY 1 ASC
+)
+SELECT `MONTH`, total_off,
+       SUM(total_off) OVER(ORDER BY `MONTH`) AS rolling_total_cumulé
+FROM Rolling_Total;
+
+-- 4.2. Visualisation brute des licenciements par entreprise ET par année
+SELECT company, YEAR(`date`), SUM(total_laid_off)
+FROM layoffs_staging2
+GROUP BY company, YEAR(`date`)
+ORDER BY company ASC;
+
+-- 4.3. Le "Saint-Graal" de l'EDA : Trouver le TOP 5 des entreprises qui ont le plus 
+-- licencié pour CHAQUE année, en utilisant des CTE imbriquées et DENSE_RANK().
+WITH Company_Year (company, years, total_laid_off) AS
+(
+    -- CTE 1 : On regroupe d'abord les données par boîte et par année
+    SELECT company, YEAR(`date`), SUM(total_laid_off)
+    FROM layoffs_staging2
+    GROUP BY company, YEAR(`date`)
+), Company_Year_Rank AS
+(
+    -- CTE 2 : On applique un classement (Rank) partitionné par année et trié par volume
+    SELECT *, 
+           DENSE_RANK() OVER (PARTITION BY years ORDER BY total_laid_off DESC) AS ranking 
+    FROM Company_Year
+    WHERE years IS NOT NULL
+)
+-- Requête finale : On filtre pour ne garder que le Top 5 de chaque année
+SELECT * 
+FROM Company_Year_Rank
+WHERE ranking <= 5;
