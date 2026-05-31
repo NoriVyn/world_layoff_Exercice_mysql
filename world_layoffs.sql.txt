@@ -1,0 +1,187 @@
+-- =============================================================================
+-- PROJET DE NETTOYAGE DE DONNÉES (DATA CLEANING) - WORLD LAYOFFS
+-- Outil : MySQL Workbench
+-- Auteur : Exécuté avec succès après une grosse semaine de shift ! 🚀
+-- =============================================================================
+
+-- -----------------------------------------------------------------------------
+-- ÉTAPE 1 : EXPLORATION INITIALE & CRÉATION DU STAGING
+-- -----------------------------------------------------------------------------
+
+-- 1.1. Observation des données brutes d'origine
+SELECT *
+FROM layoffs;
+
+-- 1.2. Création d'une table "Staging" avec la même structure pour protéger la source
+CREATE TABLE layoffs_staging
+LIKE layoffs;
+
+-- 1.3. Vérification de la structure vide de la table staging
+SELECT * 
+FROM layoffs_staging;
+
+-- 1.4. Copie de l'intégralité des données brutes dans la table staging
+INSERT layoffs_staging
+SELECT * 
+FROM layoffs;
+
+
+-- -----------------------------------------------------------------------------
+-- ÉTAPE 2 : IDENTIFICATION ET TRAITEMENT DES DOUBLONS
+-- -----------------------------------------------------------------------------
+
+-- 2.1. Utilisation d'une CTE et de ROW_NUMBER() pour repérer les doublons parfaits
+WITH duplicate_cte AS 
+(
+    SELECT *,
+    ROW_NUMBER() OVER( 
+        PARTITION BY company, location, industry, total_laid_off, 
+                     percentage_laid_off, `date`, stage, country, funds_raised_millions
+    ) AS row_num
+    FROM layoffs_staging
+)
+SELECT * 
+FROM duplicate_cte
+WHERE row_num > 1; -- Si row_num > 1, la ligne est un doublon exact
+
+-- 2.2. Vérification sur un cas concret (ex: l'entreprise Casper)
+SELECT * 
+FROM layoffs_staging
+WHERE company = 'Casper';
+
+-- 2.3. Création de 'layoffs_staging2' intégrant physiquement la colonne row_num
+-- (Nécessaire car MySQL ne permet pas de DELETE directement sur une CTE)
+CREATE TABLE `layoffs_staging2` (
+  `company` text,
+  `location` text,
+  `industry` text,
+  `total_laid_off` int DEFAULT NULL,
+  `percentage_laid_off` text,
+  `date` text,
+  `stage` text,
+  `country` text,
+  `funds_raised_millions` int DEFAULT NULL,
+  `row_num` INT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- 2.4. Remplissage de la table staging2 avec le calcul des doublons
+INSERT INTO layoffs_staging2
+SELECT *,
+ROW_NUMBER() OVER( 
+    PARTITION BY company, location, industry, total_laid_off, 
+                 percentage_laid_off, `date`, stage, country, funds_raised_millions
+) AS row_num
+FROM layoffs_staging;
+
+-- 2.5. Suppression définitive des lignes en doublon (row_num > 1)
+DELETE 
+FROM layoffs_staging2
+WHERE row_num > 1;
+
+-- 2.6. Vérification pour s'assurer qu'il ne reste plus aucun doublon
+SELECT *
+FROM layoffs_staging2
+WHERE row_num > 1;
+
+
+-- -----------------------------------------------------------------------------
+-- ÉTAPE 3 : STANDARDISATION ET HARMONISATION DES DONNÉES
+-- -----------------------------------------------------------------------------
+
+-- 3.1. Nettoyage des espaces superflus dans le nom des entreprises
+SELECT company, TRIM(company)
+FROM layoffs_staging2;
+
+UPDATE layoffs_staging2
+SET company = TRIM(company);
+
+-- 3.2. Uniformisation des pays (Correction de la variante 'United States.')
+-- Utilisation astucieuse du pattern '%' pour tout regrouper proprement !
+SELECT DISTINCT country
+FROM layoffs_staging2
+WHERE country LIKE 'United States%';
+
+UPDATE layoffs_staging2
+SET country = 'United States'
+WHERE country LIKE 'United States%';
+
+-- Vérification de l'index des pays classés par ordre alphabétique
+SELECT DISTINCT country
+FROM layoffs_staging2
+ORDER BY 1;
+
+-- 3.3. Conversion de la colonne Date (du format TEXT américain vers le format DATE SQL)
+SELECT `date`, 
+STR_TO_DATE(`date`,'%m/%d/%Y')
+FROM layoffs_staging2;
+
+UPDATE layoffs_staging2
+SET `date` = STR_TO_DATE(`date`,'%m/%d/%Y');
+
+-- Modification physique du Type de la colonne dans la structure de la table
+ALTER TABLE layoffs_staging2 
+MODIFY COLUMN `date` DATE;
+
+
+-- -----------------------------------------------------------------------------
+-- ÉTAPE 4 : TRAITEMENT DES VALEURS MANQUANTES (NULL & BLANCS)
+-- -----------------------------------------------------------------------------
+
+-- 4.1. Identification des lignes où l'industrie est manquante
+SELECT *
+FROM layoffs_staging2
+WHERE industry IS NULL 
+OR industry = '';
+
+-- 4.2. Passage de toutes les chaînes vides ('') à NULL pour homogénéiser
+UPDATE layoffs_staging2 
+SET industry = NULL
+WHERE industry = '';
+
+-- 4.3. Analyse d'un cas particulier (Airbnb) pour comprendre la stratégie de récupération
+SELECT *
+FROM layoffs_staging2
+WHERE company = 'Airbnb';
+
+-- 4.4. Visualisation de la jointure pour associer les lignes vides avec les lignes remplies
+SELECT *
+FROM layoffs_staging2 t1
+JOIN layoffs_staging2 t2
+	ON t1.company = t2.company 
+    AND t1.location = t2.location
+WHERE t1.industry IS NULL
+AND t2.industry IS NOT NULL;
+
+-- 4.5. Exécution de la jointure magique (Self-Join) pour corriger et remplir l'industrie !
+UPDATE layoffs_staging2 t1
+JOIN layoffs_staging2 t2
+	ON t1.company = t2.company
+    AND t1.location = t2.location -- Sécurité ajoutée pour être ultra-précis par secteur
+SET t1.industry = t2.industry
+WHERE t1.industry IS NULL
+AND t2.industry IS NOT NULL;
+
+
+-- -----------------------------------------------------------------------------
+-- ÉTAPE 5 : NETTOYAGE FINAL DES DONNÉES INEXPLOITABLES
+-- -----------------------------------------------------------------------------
+
+-- 5.1. Recherche des lignes totalement vides sur les licenciements (inutilisables pour l'analyse)
+SELECT *
+FROM layoffs_staging2
+WHERE total_laid_off IS NULL
+AND percentage_laid_off IS NULL;
+
+-- 5.2. Suppression de ces lignes inutiles
+DELETE 
+FROM layoffs_staging2
+WHERE total_laid_off IS NULL
+AND percentage_laid_off IS NULL;
+
+-- 5.3. Nettoyage de l'échafaudage : Suppression de la colonne row_num devenue inutile
+ALTER TABLE layoffs_staging2
+DROP COLUMN row_num; 
+
+-- 5.4. Affichage final du Dataset parfaitement propre et prêt pour l'analyse !
+SELECT *
+FROM layoffs_staging2;
